@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "forever": "forever start -l dice-bot.log --append --uid dicebot index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -27,6 +28,9 @@
   "dependencies": {
     "botkit": "^0.6.16",
     "botkit-storage-mongo": "^1.0.2",
-    "mongodb": "^1.4.39"
+    "eslint": "^5.7.0",
+    "jsonfile": "^5.0.0",
+    "mongodb": "^1.4.39",
+    "random-js": "^1.0.8"
   }
 }
