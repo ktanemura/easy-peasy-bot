@@ -548,7 +548,6 @@ controller.hears('quit game', 'direct_mention', function(bot, message) {
 
         } else {
             games[message.thread_ts].totalDice -= games[message.thread_ts].members[message.user].roll.length;
-            delete games[message.thread_ts].members[message.user];
 
             if (!players[message.user]) {
                 players[message.user] = {
@@ -559,6 +558,8 @@ controller.hears('quit game', 'direct_mention', function(bot, message) {
             } else {
                 players[message.user].smugs += games[message.thread_ts].members[message.user].smugs;
             }
+
+            delete games[message.thread_ts].members[message.user];
             let winner = Object.keys(games[message.thread_ts].members)[0];
             checkWinner(games[message.thread_ts], winner, message.user, bot, message, s);
         }
