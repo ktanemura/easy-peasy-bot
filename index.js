@@ -53,7 +53,7 @@ if (process.env.TOKEN || process.env.SLACK_TOKEN) {
     //Treat this as an app
     var app = require('./lib/apps');
     // controller = app.configure(process.env.PORT, process.env.CLIENT_ID, process.env.CLIENT_SECRET, config, onInstallation);
-    controller = app.configure(7700, "456099323280.456110067536", "5d44344e20725effa9dc2d1d0db0d535", config, onInstallation);
+    controller = app.configure(process.env.PORT, "456099323280.456110067536", "5d44344e20725effa9dc2d1d0db0d535", config, onInstallation);
 } /*else {
     console.log('Error: If this is a custom integration, please specify TOKEN in the environment. If this is an app, please specify CLIENTID, CLIENTSECRET, and PORT in the environment');
     process.exit(1);
@@ -75,7 +75,23 @@ controller.on('rtm_open', function() {
 
 controller.on('rtm_close', function() {
     console.log('** The RTM api just closed');
-    process.exit(1);
+
+    let toStore = {
+        game_id: game_id,
+        players: players,
+        game_stats: game_stats,
+        games: games
+    };
+
+    jsonfile.writeFile(__dirname + '/game_storage.json', toStore)
+        .then(() => {
+            console.log("FILE UPDATED");
+            process.exit(1);
+        })
+        .catch(err => {
+            console.log("ERROR UPDATING FILE", err);
+            process.exit(1);
+        });
     // you may want to attempt to re-open
 });
 
@@ -111,6 +127,10 @@ jsonfile.readFile(__dirname + '/game_storage.json')
 
         if (obj.game_stats) {
             game_stats = obj.game_stats;
+        }
+
+        if (obj.games) {
+            games = obj.games;
         }
     })
     .catch(err => {
@@ -155,6 +175,29 @@ function blindProbability(total, amount, exact, wilds, value) {
     return Math.floor(pT * 10000) / 100;
 }
 
+function getSpectatorString(message) {
+    let s = `For game ${games[message.thread_ts].gid} this round players rolled ${games[message.thread_ts].totalDice} dice:\n`;
+    let dicePlayed = {};
+    for (let k in games[message.thread_ts].members) {
+        s += `<@${k}> ${games[message.thread_ts].members[k].roll}\n`;
+        for (let i = 0; i < games[message.thread_ts].members[k].roll.length; i++) {
+            if (dicePlayed[games[message.thread_ts].members[k].roll[i]]) { 
+                dicePlayed[games[message.thread_ts].members[k].roll[i]]++;
+            } else {
+                dicePlayed[games[message.thread_ts].members[k].roll[i]] = 1;
+            }
+        }
+    }
+
+    for (let i2 = 1; i2 < 7; i2++) {
+        if (dicePlayed[i2]) {
+            s += `There are ${dicePlayed[i2]} | ${i2}s\n`;        
+        }
+    }
+
+    return s;
+}
+
 function rollAllDice(game, bot, message) {
     for (let k in game.members) {
         let roll = random.dice(6, game.members[k].dice);
@@ -172,6 +215,18 @@ function rollAllDice(game, bot, message) {
         //     convo.say(`You rolled ${games[message.thread_ts].members[convo.source_message.user].roll.length} dice for game ${games[message.thread_ts].gid}: ${games[message.thread_ts].members[convo.source_message.user].roll}`);
         // });
         bot.whisper(m, `You rolled ${roll.length} dice for game ${game.gid}: ${roll}`);
+    }
+
+    if (game.spectators) {
+        let spectatorString = getSpectatorString(message);
+        let m2;
+        for (let k2 in game.spectators) {
+            m2 = {
+                user: k2,
+                channel: message.channel
+            };
+            bot.whisper(m2, spectatorString);
+        }
     }
 }
 
@@ -196,6 +251,8 @@ function checkWinner(game, winner, loser, bot, message, s) {
 
         players[winner].smugs += game.members[winner].smugs;
         game_stats.complete++;
+
+        delete games[message.thread_ts];
 
         let toStore = {
             game_id: game_id,
@@ -230,23 +287,27 @@ function checkWinner(game, winner, loser, bot, message, s) {
 
 function getCommands() {
     let s = `
-    To run a command you must mention the but (@liars_dice_bot) with the appropriate command string.\n
+    To run a command you must mention the bot (@liars_dice_bot) with the appropriate command string.\n
     (*) Commands do not have strict formatting\n
     ~~~~~~~~\n
     Top Level Commands (Made directly in channel):\n
     "new game [--exact] [--wildcards] [--numdice <num_dice>]" - Creates a new game with specified options (Flags are all optional)\n
-    "rules" (*) - Display the rules of the game
+    "save game" (*) - Saves the current state of all games\n
+    "rules" (*) - Display the rules of the game\n
+    "stats" (*) - Display the current player leaderboard and overall game statistics\n
     "help" (*) - Display this command list (Can be done in thread as well)\n
     ~~~~~~~~\n
     Game Commands (Must be made in game thread):\n
     "join game" (*) - Join the game running in the message thread\n
     "start game" (*) - Start the game in the thread (no more players can join)\n
+    "quit game" (*) - Quit playing the current game (you will take a loss)\n
     "bet <num_dice> <dice_value>" - Make a bet that there are at least num_dice of dice_value among all players\n
     "bs || liar" (*) - Challenge the last made bet (any player may call this)\n
     "exact" (*) - Call exact on the previous bet\n
     "check dice" - Will resend what you rolled in to the channel. If not in the current game (or eliminated) will whisper every players dice\n
+    "spectate" - Will subscribe you to the result of every dice roll for this game (non-players only)\n
     "prob amount" - Calculate the probability of the last bet being true\n
-    "prob exactly" - Calculate the probability of the last bet being EXACTLY true\n
+    "prob exact" - Calculate the probability of the last bet being EXACTLY true\n
     "history" (*) - Show a history of the bets made in the current round\n
     "players" (*) - Show the current players (will show who's turn it is if game has started)\n
     `;
@@ -334,6 +395,12 @@ controller.hears('new game', 'direct_mention', function(bot, message) {
                 new_game.wildcards = true;
                 break;
 
+            case "--wildcard":
+                game_stats.wilds++;
+                s += "1s are wildcards for this game.\n";
+                new_game.wildcards = true;
+                break;
+
             case "--numdice":
                 if ((i + 1) < cmd.length) {
                     let num_dice = parseInt(cmd[i + 1]);
@@ -390,6 +457,10 @@ controller.hears('join game', 'direct_mention', function(bot, message) {
     } else if (games[message.thread_ts].members[message.user]) {
         bot.replyInThread(message, `<@${message.user}> You seem to be already a member of this game!`);
     } else {
+        if (games[message.thread_ts].spectators && games[message.thread_ts].spectators[message.user]) {
+            delete games[message.thread_ts].spectators[message.user];
+            bot.replyInThread(message, `<@${message.user}> Has been removed from the spectate list`);
+        }
         games[message.thread_ts].members[message.user] = {
             dice: games[message.thread_ts].dice,
             smugs: 0
@@ -438,6 +509,18 @@ controller.hears('start game', 'direct_mention', function(bot, message) {
         }
 
         games[message.thread_ts].totalDice = numDice;
+        if (games[message.thread_ts].spectators) {
+            let spectatorString = getSpectatorString(message);
+            let m2;
+            for (let k in games[message.thread_ts].spectators) {
+                m2 = {
+                    user: k,
+                    channel: message.channel
+                };
+
+                bot.whisper(m2, spectatorString);
+            }
+        }
 
         bot.replyInThread(message, `Game ${games[message.thread_ts].gid} has started, ${games[message.thread_ts].players.length} players have rolled ${games[message.thread_ts].dice} dice. It is <@${games[message.thread_ts].players[games[message.thread_ts].currentPlayer]}>'s turn to bet. Good luck!`);
     }
@@ -451,11 +534,10 @@ controller.hears('quit game', 'direct_mention', function(bot, message) {
     } else if (!games[message.thread_ts].members[message.user]) {
         bot.replyInThread(message, `<@${message.user}> You are not a member of this game.`);
     } else {
-        delete games[message.thread_ts].members[message.user];
         let s = `<@${message.user}> Has left the game!`;
         if (games[message.thread_ts].joinable) {
             let p = [];
-
+            delete games[message.thread_ts].members[message.user];
             for (let i = 0; i < games[message.thread_ts].players.length; i++) {
                 if (games[message.thread_ts].players[i] !== message.user) {
                     p.push(games[message.thread_ts].players[i]);
@@ -466,6 +548,8 @@ controller.hears('quit game', 'direct_mention', function(bot, message) {
 
         } else {
             games[message.thread_ts].totalDice -= games[message.thread_ts].members[message.user].roll.length;
+            delete games[message.thread_ts].members[message.user];
+
             if (!players[message.user]) {
                 players[message.user] = {
                     wins: 0,
@@ -478,7 +562,26 @@ controller.hears('quit game', 'direct_mention', function(bot, message) {
             let winner = Object.keys(games[message.thread_ts].members)[0];
             checkWinner(games[message.thread_ts], winner, message.user, bot, message, s);
         }
+
     }
+});
+
+controller.hears('save game', 'direct_mention', function(bot, message) {
+    let toStore = {
+        game_id: game_id,
+        players: players,
+        game_stats: game_stats,
+        games: games
+    };
+
+    jsonfile.writeFile(__dirname + '/game_storage.json', toStore)
+        .then(() => {
+            console.log("FILE UPDATED");
+            bot.replyInThread(message, `<@${message.user}> Games have been saved!`);
+        })
+        .catch(err => {
+            console.log("ERROR UPDATING FILE", err);
+        });
 });
 
 controller.hears('bet', 'direct_mention', function(bot, message) {
@@ -519,13 +622,54 @@ controller.hears('bet', 'direct_mention', function(bot, message) {
                 games[message.thread_ts].currentPlayer++;
                 games[message.thread_ts].currentPlayer = games[message.thread_ts].currentPlayer < games[message.thread_ts].players.length ? games[message.thread_ts].currentPlayer : 0;
             }
-            games[message.thread_ts].history.push(`<@${message.user}> bet ${nD} ${dV}s`);
+            games[message.thread_ts].history.push(`<@${message.user}> bet ${nD} | ${dV}s`);
             bot.replyInThread(message, `<@${games[message.thread_ts].players[games[message.thread_ts].currentPlayer]}> It is now your turn to bet!`);
 
         }
 
     } else {
         bot.replyInThread(message, `<@${message.user}> To bet you must mention me with format "bet <num_dice> <die_value> in a game thread."`);
+    }
+});
+
+
+controller.hears('prob amount', 'direct_message', function(bot, message) {
+    let cmd = message.text.split(" ");
+
+    if (cmd.length !== 4) {
+        bot.reply(message, `Message me with format "prob amount <num_dice> <total_dice> for a specific probability.`);
+    } else {
+        let amount = parseInt(cmd[2]);
+        let total = parseInt(cmd[3]);
+
+        if (!amount || !total) {
+            bot.reply(message, `Message me with format "prob amount <num_dice> <total_dice> for a specific probability.`);
+        } else {
+            let p = blindProbability(total, amount, false, true, 2);
+            let p2 = blindProbability(total, amount, false, false, 2);
+            bot.reply(message, `There is a ${p}% probability of there being at least ${amount} die with the same face, including wildcards.`);
+            bot.reply(message, `There is a ${p2}% probability of there being at least ${amount} die with the same face, excluding wildcards.`);
+        }
+    }
+});
+
+controller.hears('prob exact', 'direct_message', function(bot, message) {
+    let cmd = message.text.split(" ");
+
+    if (cmd.length !== 4) {
+        bot.reply(message, `Message me with format "prob amount <num_dice> <total_dice> for a specific probability.`);
+    } else {
+        let amount = parseInt(cmd[2]);
+        let total = parseInt(cmd[3]);
+
+        if (!amount || !total) {
+            bot.reply(message, `Message me with format "prob amount <num_dice> <total_dice> for a specific probability.`);
+        } else {
+            let p = blindProbability(total, amount, true, true, 2);
+            let p2 = blindProbability(total, amount, true, false, 2);
+            bot.reply(message, `There is a ${p}% probability of there being exactly ${amount} die with the same face, including wildcards.`);
+            bot.reply(message, `There is a ${p2}% probability of there being exactly ${amount} die with the same face, excluding wildcards.`);
+        }
     }
 });
 
@@ -537,7 +681,7 @@ controller.hears('prob amount', 'direct_mention', function(bot, message) {
     } else if (games[message.thread_ts].joinable) {
         bot.replyInThread(message, `<@${message.user}> This game hasn't started yet.`);
     } else if (!games[message.thread_ts].lastBet) {
-        bot.replyInThread(message, `<@${message.user}> There is no bet to calculate probablility for.`);
+        bot.replyInThread(message, `<@${message.user}> There is no bet to calculate probability for.`);
     } else {
         let p = blindProbability(games[message.thread_ts].totalDice, games[message.thread_ts].lastBet.amount, false, games[message.thread_ts].wildcards, games[message.thread_ts].lastBet.value);
         bot.replyInThread(message, `<@${message.user}> The probability of at least ${games[message.thread_ts].lastBet.amount} ${games[message.thread_ts].lastBet.value}s is ${p}%`);
@@ -545,7 +689,7 @@ controller.hears('prob amount', 'direct_mention', function(bot, message) {
 });
 
 
-controller.hears('prob exactly', 'direct_mention', function(bot, message) {
+controller.hears('prob exact', 'direct_mention', function(bot, message) {
     if (!message.thread_ts) {
         bot.replyInThread(message, `<@${message.user}> You need to mention me in game thread to check the history! Try replying to a thread, or make a new game!`);
     } else if (!games[message.thread_ts]) {
@@ -553,10 +697,10 @@ controller.hears('prob exactly', 'direct_mention', function(bot, message) {
     } else if (games[message.thread_ts].joinable) {
         bot.replyInThread(message, `<@${message.user}> This game hasn't started yet.`);
     } else if (!games[message.thread_ts].lastBet) {
-        bot.replyInThread(message, `<@${message.user}> There is no bet to calculate probablility for.`);
+        bot.replyInThread(message, `<@${message.user}> There is no bet to calculate probability for.`);
     } else {
         let p = blindProbability(games[message.thread_ts].totalDice, games[message.thread_ts].lastBet.amount, true, games[message.thread_ts].wildcards, games[message.thread_ts].lastBet.value);
-        bot.replyInThread(message, `<@${message.user}> The probability of exactly ${games[message.thread_ts].lastBet.amount} ${games[message.thread_ts].lastBet.value}s is ${p}%`);
+        bot.replyInThread(message, `<@${message.user}> The probability of exactly ${games[message.thread_ts].lastBet.amount} | ${games[message.thread_ts].lastBet.value}s is ${p}%`);
     }
 });
 
@@ -600,9 +744,27 @@ controller.hears(['bs', 'BS', 'liar', 'LIAR'], 'direct_mention', function(bot, m
             loser = games[message.thread_ts].lastBet.better;
         }
 
-        let s = rolls + `There were ${nD} ${games[message.thread_ts].lastBet.value}s${games[message.thread_ts].wildcards ? " (including wildcard 1s)" : ""}.\n`;
+        let s = rolls + `There were ${nD} | ${games[message.thread_ts].lastBet.value}s${games[message.thread_ts].wildcards ? " (including wildcard 1s)" : ""}.\n`;
         s += `<@${winner}> won the round and <@${loser}> lost a die.${dasright}\n`;
+
         games[message.thread_ts].members[loser].dice--;
+        if (games[message.thread_ts].lastLoser && games[message.thread_ts].lastLoser === loser) { 
+            games[message.thread_ts].lossStreak++;
+            s += `<@${loser}> Has lost`;
+            for (let i2 = 0; i2 < games[message.thread_ts].lossStreak; i2++) {
+                if (games[message.thread_ts].members[loser].dice === 0) {
+                    s += " :bsrage:";
+                } else {
+                    s += " :bslee:";
+                }
+            }
+
+            s += " rounds in a row! Unfortunate.\n";
+        } else {
+            games[message.thread_ts].lastLoser = loser;
+            games[message.thread_ts].lossStreak = 1;
+        }
+
         games[message.thread_ts].totalDice--;
         games[message.thread_ts].history = [];
         delete games[message.thread_ts].lastBet;
@@ -644,11 +806,11 @@ controller.hears('exact', 'direct_mention', function(bot, message) {
         bot.replyInThread(message, `<@${message.user}> You either are not playing, or have been eliminated already!`);
     } else if (!games[message.thread_ts].exact) {
         bot.replyInThread(message, `<@${message.user}> Exact is not enabled for this game`);
-    } else if (!games[message.thread_ts].lastBet) {
+    } else if (!games[message.thread_ts].lastBet) { 
         bot.replyInThread(message, `<@${message.user}> There is no bet to call exact on!`);
     } else if (games[message.thread_ts].lastBet.better === message.user) {
         bot.replyInThread(message, `<@${message.user}> You can't call exact on yourself!`);
-    } else {
+    } else if (message.match.index === 0) {
         let nD = 0;
         let rolls = "";
         for (var k in games[message.thread_ts].members) {
@@ -664,7 +826,7 @@ controller.hears('exact', 'direct_mention', function(bot, message) {
         let better = games[message.thread_ts].lastBet.better;
         let guesser = message.user;
         let nextUser = better;
-        let s = rolls + `There were ${nD} ${games[message.thread_ts].lastBet.value}s${games[message.thread_ts].wildcards ? " (including wildcard 1s)" : ""}.\n`;
+        let s = rolls + `There were ${nD} | ${games[message.thread_ts].lastBet.value}s${games[message.thread_ts].wildcards ? " (including wildcard 1s)" : ""}.\n`;
 
         if (correct) {
             s += `<@${guesser}> guessed the exact amount and gained a die.\n`;
@@ -677,6 +839,25 @@ controller.hears('exact', 'direct_mention', function(bot, message) {
             games[message.thread_ts].members[guesser].dice--;
             games[message.thread_ts].totalDice--;
         }
+
+        if (games[message.thread_ts].lastLoser && !correct && games[message.thread_ts].lastLoser === guesser) { 
+            games[message.thread_ts].lossStreak++;
+            s += `<@${guesser}> Has lost`;
+            for (let i2 = 0; i2 < games[message.thread_ts].lossStreak; i2++) {
+                if (games[message.thread_ts].members[guesser].dice === 0) {
+                    s += " :bsrage:";
+                } else {
+                    s += " :bslee:";
+                }
+            }
+            s += " rounds in a row! Unfortunate.\n";
+        } else if ((!games[message.thread_ts].lastLoser || games[message.thread_ts].lastLoser !== guesser) && !correct) {
+            games[message.thread_ts].lastLoser = guesser;
+            games[message.thread_ts].lossStreak = 1;
+        } else if (correct && games[message.thread_ts].lastLoser && games[message.thread_ts].lastLoser === guesser) {
+            delete games[message.thread_ts].lastLoser;
+        }
+
         games[message.thread_ts].history = [];
         delete games[message.thread_ts].lastBet;
         if (games[message.thread_ts].members[guesser].dice === 0) {
@@ -712,25 +893,7 @@ controller.hears('check dice', 'direct_mention', function(bot, message) {
     } else if (games[message.thread_ts].joinable) {
         bot.replyInThread(message, `<@${message.user}> This game hasn't started yet.`);
     } else if (!games[message.thread_ts].members[message.user]) {
-        let s = `For game ${games[message.thread_ts].gid} this round players rolled ${games[message.thread_ts].totalDice} dice:`;
-        let dicePlayed = {};
-        for (let k in games[message.thread_ts].members) {
-            s += `<@${k}> ${games[message.thread_ts].members[k].roll}\n`;
-            for (let i = 0; i < games[message.thread_ts].members[k].roll.length; i++) {
-                if (dicePlayed[games[message.thread_ts].members[k].roll[i]]) { 
-                    dicePlayed[games[message.thread_ts].members[k].roll[i]]++;
-                } else {
-                    dicePlayed[games[message.thread_ts].members[k].roll[i]] = 1;
-                }
-            }
-        }
-
-        for (let i2 = 1; i2 < 7; i2++) {
-            if (dicePlayed[i2]) {
-                s += `There are ${dicePlayed[i2]} ${i2}s\n`;        
-            }
-        }
-        bot.whisper(message, s);
+        bot.whisper(message, getSpectatorString(message));
     } else {
         let s = `For game ${games[message.thread_ts].gid} this round you rolled: ${games[message.thread_ts].members[message.user].roll}\n`;
 
@@ -759,6 +922,31 @@ controller.hears('history', 'direct_mention', function(bot, message) {
         }
 
         bot.replyInThread(message, s);
+    }
+});
+
+controller.hears(['spectate game', 'spectate'], 'direct_mention', function(bot, message) {
+    if (!message.thread_ts) {
+        bot.replyInThread(message, `<@${message.user}> You need to mention me in game thread to spectate! Try replying to a thread, or make a new game!`);
+    } else if (!games[message.thread_ts]) {
+        bot.replyInThread(message, `<@${message.user}> There doesn't seem to be a game going on in this thread, or it is completed. Try making a new game!`);
+    } else if (games[message.thread_ts].members[message.user]) {
+        bot.replyInThread(message, `<@${message.user}> You are playing in this game!`);
+    } else if (games[message.thread_ts].spectators && games[message.thread_ts].spectators[message.user]) {
+        bot.replyInThread(message, `<@${message.user}> You are already spectating this game.`);
+    } else {
+        if (!games[message.thread_ts].spectators) {
+            games[message.thread_ts].spectators = {};
+        }
+
+        games[message.thread_ts].spectators[message.user] = true;
+
+        bot.replyInThread(message, `<@${message.user}> You have been added to the spectator list.`);
+
+        if (!games[message.thread_ts].joinable) {
+            let spectatorString = getSpectatorString(message);
+            bot.whisper(message, spectatorString);
+        }
     }
 });
 
@@ -805,20 +993,27 @@ controller.hears('stats', 'direct_mention', function(bot, message) {
     Player Leaderboard:\n`;
     let pls = [];
     let pl;
-    let wp;
     for (let key in players) {
         pl = {};
         pl.wins = players[key].wins;
-        wp = 100;
+        pl.losses = players[key].losses;
+        pl.wp = 100;
         if (players[key].losses > 0) {
-            wp = Math.floor(players[key].wins / (players[key].losses + players[key].wins) * 100);
+            pl.wp = Math.floor(players[key].wins / (players[key].losses + players[key].wins) * 100);
         }
-        pl.str = `    <@${key}> ${players[key].wins}-${players[key].losses} (${wp}%) with ${players[key].smugs} :smugroy:\n`;
+        pl.str = `    <@${key}> ${players[key].wins}-${players[key].losses} (${pl.wp}%) with ${players[key].smugs} :smugroy:\n`;
         pls.push(pl);
     }
 
     pls.sort(function(a, b) {
-        return b.wins - a.wins;
+
+        if (b.wins !== a.wins) { 
+            return b.wins - a.wins;
+        } else if (b.wp !== a.wp) {
+            return b.wp - a.wp;
+        } else {
+            return a.losses - b.losses;
+        }
     });
 
     for (let i = 0; i < pls.length; i++) {
